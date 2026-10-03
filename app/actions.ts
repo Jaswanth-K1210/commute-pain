@@ -68,9 +68,9 @@ export async function forget() {
 function parsePlace(raw: FormDataEntryValue | null): Place | null {
   try {
     const p = JSON.parse(String(raw));
-    const ok = typeof p.label === "string" && p.label.length <= 80 &&
+    const ok = typeof p.label === "string" && p.label.length <= 200 &&
       p.lat > 16.8 && p.lat < 18.2 && p.lng > 77.8 && p.lng < 79.2; // greater Hyderabad only
-    return ok ? { label: p.label.trim(), lat: +p.lat, lng: +p.lng } : null;
+    return ok ? { label: p.label.trim().slice(0, 120), lat: +p.lat, lng: +p.lng } : null;
   } catch {
     return null;
   }
@@ -89,7 +89,10 @@ export async function addCommute(_: FormState, form: FormData): Promise<FormStat
     if ((await routes.countDocuments({ owner_id })) >= MAX_PER_USER) return { error: `max ${MAX_PER_USER} commutes per player` };
     if ((await routes.countDocuments({ active: true })) >= MAX_ROUTES) return { error: "server's full (free-tier traffic budget) 😭 try later" };
 
-    const short = (s: string) => s.split(",")[0].slice(0, 30);
+    const short = (s: string) => {
+      const head = s.split(",")[0].trim();
+      return head.length <= 28 ? head : `${head.slice(0, 28).replace(/\s+\S*$/, "")}…`; // cut on a word boundary
+    };
     // ponytail: max+1 channel number can collide under simultaneous adds; harmless (display only).
     const [top] = await routes.find().sort({ ch: -1 }).limit(1).toArray();
     await routes.insertOne({
