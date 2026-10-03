@@ -1,42 +1,99 @@
-// Server-only Supabase access over REST with the service key. Never import from a client component.
+// Server-only MongoDB access. Never import from a client component.
+import { MongoClient, ObjectId, type Db } from "mongodb";
+import { unstable_cache } from "next/cache";
 import type { Slot } from "./pain";
 
 export const MAX_ROUTES = 45; // TomTom free tier budget, keep in sync with logger.py
 export const MAX_PER_USER = 3;
 
-export type Route = {
-  id: number; slug: string; name: string; owner_id: string | null;
-  origin_label: string | null; dest_label: string | null; owner: { name: string } | null;
+export type Place = { label: string; lat: number; lng: number };
+export type UserDoc = { _id: ObjectId; name: string; pin_hash: string; failed_pins: number; locked_until: Date | null; created_at: Date };
+export type RouteDoc = {
+  _id: ObjectId; slug: string; ch: number; name: string; owner_id: ObjectId | null; owner_name: string | null;
+  origin: Place; dest: Place; active: boolean; created_at: Date;
 };
-export type Alt = { duration_sec: number; distance_m: number };
-export type Latest = { route_id: number; duration_sec: number; traffic_delay_sec: number; distance_m: number; alternatives: Alt[]; logged_at: string };
+export type LogDoc = {
+  route_id: ObjectId; duration_sec: number; traffic_delay_sec: number; distance_m: number;
+  alternatives: { duration_sec: number; distance_m: number }[]; logged_at: Date;
+};
 
-const URL = process.env.SUPABASE_URL?.replace(/\/$/, "");
-const KEY = process.env.SUPABASE_SERVICE_KEY;
+/** What pages get: plain, serializable. */
+export type Route = { id: string; slug: string; ch: number; name: string; owner_id: string | null; owner_name: string | null; origin_label: string; dest_label: string };
+export type Latest = Omit<LogDoc, "route_id" | "logged_at"> & { route_id: string; logged_at: string };
 
-export const storageUrl = (p: string) => `${URL}/storage/v1${p}`;
-
-/** Raw call; throws on HTTP errors. Legacy JWT keys also need a bearer token, new sb_secret_ keys must not send one. */
-export async function sb<T = unknown>(path: string, init: RequestInit & { next?: { revalidate: number } } = {}): Promise<T> {
-  if (!URL || !KEY) throw new Error("SUPABASE_URL / SUPABASE_SERVICE_KEY not set");
-  const auth: Record<string, string> = KEY.startsWith("ey") ? { Authorization: `Bearer ${KEY}` } : {};
-  const res = await fetch(URL + path, { cache: "no-store", ...init, headers: { apikey: KEY, ...auth, ...init.headers } });
-  if (!res.ok) throw new Error(`supabase ${res.status} ${path.split("?")[0]}: ${await res.text()}`);
-  return (res.status === 204 || res.headers.get("content-length") === "0" ? null : await res.json()) as T;
+// One client per server instance (survives hot reload in dev).
+const g = globalThis as unknown as { _mongo?: Promise<Db> };
+export function db(): Promise<Db> {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return Promise.reject(new Error("MONGODB_URI not set"));
+  return (g._mongo ??= new MongoClient(uri, { maxPoolSize: 5 }).connect().then(async (c) => {
+    const d = c.db(process.env.MONGODB_DB || "commute_pain");
+    await d.collection("users").createIndex({ name: 1 }, { unique: true }); // idempotent
+    await d.collection("routes").createIndex({ slug: 1 }, { unique: true });
+    return d;
+  }).catch((e) => { g._mongo = undefined; throw e; }));
 }
+
+export const col = async <T extends object>(name: "users" | "routes" | "commute_logs") => (await db()).collection<T>(name);
+
+const toRoute = (r: RouteDoc): Route => ({
+  id: r._id.toHexString(), slug: r.slug, ch: r.ch, name: r.name,
+  owner_id: r.owner_id?.toHexString() ?? null, owner_name: r.owner_name,
+  origin_label: r.origin.label, dest_label: r.dest.label,
+});
 
 /** Soft read: UI shows "collecting data…" instead of a 500 when the DB is unreachable. */
-async function read<T>(path: string, revalidate?: number): Promise<T[]> {
-  try {
-    return await sb<T[]>(`/rest/v1/${path}`, revalidate ? { cache: undefined, next: { revalidate } } : {});
-  } catch (e) {
-    console.error(e);
-    return [];
-  }
+async function soft<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
+  try { return await fn(); } catch (e) { console.error(e); return fallback; }
 }
 
-const ROUTE_COLS = "id,slug,name,owner_id,origin_label,dest_label,owner:users(name)";
-export const getRoutes = () => read<Route>(`routes?select=${ROUTE_COLS}&active=eq.true&order=id`);
-export const getRoute = async (slug: string) => (await read<Route>(`routes?select=${ROUTE_COLS}&slug=eq.${encodeURIComponent(slug)}`))[0];
-export const getSlots = (routeId: number) => read<Slot>(`slot_stats?route_id=eq.${routeId}&select=dow,slot,median_min,n`, 300);
-export const getLatest = () => read<Latest>("latest_logs?select=*", 60);
+export const getRoutes = (filter: Partial<Pick<RouteDoc, "owner_id">> = {}) =>
+  soft(async () => (await (await col<RouteDoc>("routes")).find({ active: true, ...filter }).sort({ ch: 1 }).toArray()).map(toRoute), []);
+
+export const getRoute = (slug: string) =>
+  soft(async () => { const r = await (await col<RouteDoc>("routes")).findOne({ slug }); return r ? toRoute(r) : undefined; }, undefined);
+
+const IST = "Asia/Kolkata";
+
+/** Median minutes per route × IST weekday (0=Mon) × half-hour slot, last 8 weeks. One aggregation for all routes, cached 5 min. */
+const allSlots = unstable_cache(
+  () => soft(async () => {
+    const rows = await (await col<LogDoc>("commute_logs")).aggregate<{ _id: { r: ObjectId; d: number; h: number; half: boolean }; median: number; n: number }>([
+      { $match: { logged_at: { $gt: new Date(Date.now() - 56 * 86400_000) } } },
+      { $group: {
+        _id: {
+          r: "$route_id",
+          d: { $dayOfWeek: { date: "$logged_at", timezone: IST } },
+          h: { $hour: { date: "$logged_at", timezone: IST } },
+          half: { $gte: [{ $minute: { date: "$logged_at", timezone: IST } }, 30] },
+        },
+        median: { $median: { input: "$duration_sec", method: "approximate" } },
+        n: { $sum: 1 },
+      } },
+    ]).toArray();
+    const out: Record<string, Slot[]> = {};
+    for (const { _id, median, n } of rows) {
+      // $dayOfWeek: 1=Sun..7=Sat → 0=Mon..6=Sun
+      (out[_id.r.toHexString()] ??= []).push({ dow: (_id.d + 5) % 7, slot: _id.h * 2 + (_id.half ? 1 : 0), median_min: Math.round(median / 6) / 10, n });
+    }
+    return out;
+  }, {} as Record<string, Slot[]>),
+  ["slots"],
+  { revalidate: 300 },
+);
+export const getSlots = async (routeId: string) => (await allSlots())[routeId] ?? [];
+
+/** Latest reading per route (from the last 2h; older = stale anyway). */
+export const getLatest = () =>
+  soft(async () => {
+    const rows = await (await col<LogDoc>("commute_logs")).aggregate<LogDoc>([
+      { $match: { logged_at: { $gt: new Date(Date.now() - 2 * 3600_000) } } },
+      { $sort: { logged_at: -1 } },
+      { $group: { _id: "$route_id", doc: { $first: "$$ROOT" } } },
+      { $replaceWith: "$doc" },
+      { $project: { _id: 0 } },
+    ]).toArray();
+    return rows.map((l): Latest => ({ ...l, route_id: l.route_id.toHexString(), logged_at: l.logged_at.toISOString() }));
+  }, [] as Latest[]);
+
+export { ObjectId };

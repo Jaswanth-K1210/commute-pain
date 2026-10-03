@@ -60,7 +60,7 @@ function Card({ route, live, v, seed }: { route: Route; live?: Latest; v: Return
   return (
     <div className="card overflow-hidden">
       <div className={`${st.bg} flex items-center justify-between border-b-[3px] border-ink px-3 py-2`}>
-        <span className="font-pixel truncate text-[9px]">{route.owner ? `@${route.owner.name}` : "COMMUNITY"}</span>
+        <span className="font-pixel truncate text-[9px]">{route.owner_name ? `@${route.owner_name}` : "COMMUNITY"}</span>
         <span className="font-pixel shrink-0 text-xs">{v.level === "wait" && v.waitMin ? `WAIT ${v.waitMin} MIN` : st.label}</span>
       </div>
       <Link href={`/route/${route.slug}`} className="block space-y-3 p-4 hover:bg-cream">
@@ -89,7 +89,7 @@ function Card({ route, live, v, seed }: { route: Route; live?: Latest; v: Return
         )}
       </Link>
       <Link href={`/radio/${route.slug}`} className="font-pixel flex items-center justify-between border-t-[3px] border-ink bg-lilac px-3 py-2 text-[9px] hover:bg-sky">
-        <span>📻 TUNE IN</span><span>CH {String(route.id).padStart(2, "0")} ▶</span>
+        <span>📻 TUNE IN</span><span>CH {String(route.ch).padStart(2, "0")} ▶</span>
       </Link>
     </div>
   );

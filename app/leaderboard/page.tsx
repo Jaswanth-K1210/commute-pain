@@ -26,7 +26,7 @@ export default async function Leaderboard() {
                 <div className="flex items-baseline justify-between gap-2">
                   <div className="min-w-0">
                     <h2 className="font-pixel truncate text-[10px] sm:text-xs">{route.name}</h2>
-                    <p className="font-pixel mt-1 text-[8px] text-mute">{route.owner ? `@${route.owner.name}` : "community"}</p>
+                    <p className="font-pixel mt-1 text-[8px] text-mute">{route.owner_name ? `@${route.owner_name}` : "community"}</p>
                   </div>
                   <span className="text-3xl leading-none">{x ? `${x.ratio.toFixed(1)}x` : "…"}</span>
                 </div>

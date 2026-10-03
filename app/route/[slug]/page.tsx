@@ -26,7 +26,7 @@ export default async function RoutePage({ params }: PageProps<"/route/[slug]">) 
   return (
     <>
       <h1 className="font-pixel text-lg leading-snug [overflow-wrap:anywhere] sm:text-2xl">{route.name}</h1>
-      <p className="mt-1 font-pixel text-[9px] text-mute">{route.owner ? `@${route.owner.name}'s ride` : "community route"}</p>
+      <p className="mt-1 font-pixel text-[9px] text-mute">{route.owner_name ? `@${route.owner_name}'s ride` : "community route"}</p>
       <p className="mt-2 text-mute">{line ? `${line}. you've been warned.` : "collecting data… come back after a few days of suffering."}</p>
 
       <Link href={`/radio/${route.slug}`} className="card press font-pixel mt-4 block bg-lilac px-4 py-3 text-[10px]">📻 TUNE IN TO THIS ROUTE&apos;S RADIO ▶</Link>

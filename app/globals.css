@@ -25,6 +25,8 @@ body {
   line-height: 1.25;
 }
 
+/* In the components layer so Tailwind utilities (bg-*, etc.) can override them. */
+@layer components {
 /* Chunky arcade card: hard shadow, presses down on hover. */
 .card {
   background: var(--color-paper);
@@ -50,6 +52,7 @@ body {
 .hp > div {
   height: 100%;
   background-image: repeating-linear-gradient(90deg, currentColor 0 8px, transparent 8px 10px);
+}
 }
 
 .blink { animation: blink 1.1s steps(1) infinite; }

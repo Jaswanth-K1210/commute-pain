@@ -13,5 +13,5 @@ export default async function RadioPage({ params }: PageProps<"/radio/[slug]">) 
   if (!me) redirect("/");
   const route = await getRoute((await params).slug);
   if (!route) notFound();
-  return <Radio slug={route.slug} channel={route.name} ch={route.id} me={me.name} />;
+  return <Radio slug={route.slug} channel={route.name} ch={route.ch} me={me.name} />;
 }

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { MAX_PER_USER, sb, type Route } from "@/lib/db";
+import { MAX_PER_USER, ObjectId, getRoutes } from "@/lib/db";
 import { getSession } from "@/lib/session";
 import { deleteCommute, logout } from "../actions";
 import AddCommute from "./AddCommute";
@@ -10,7 +10,7 @@ export const metadata = { title: "Profile · Commute Pain" };
 export default async function Me() {
   const me = await getSession();
   if (!me) redirect("/");
-  const routes = await sb<Route[]>(`/rest/v1/routes?owner_id=eq.${me.id}&select=id,slug,name,origin_label,dest_label&order=id`).catch(() => []);
+  const routes = await getRoutes({ owner_id: new ObjectId(me.id) });
 
   return (
     <div className="mx-auto max-w-xl space-y-6">

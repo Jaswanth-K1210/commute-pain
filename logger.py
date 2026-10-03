@@ -1,30 +1,58 @@
-"""Log traffic-aware travel times for every active route into Supabase, and expire old radio chatter.
+"""Log traffic-aware travel times for every active route into MongoDB Atlas.
 
-Env: TOMTOM_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY. Runs every 30 min, 4:30am–1:30am IST (see .github/workflows/log.yml).
+Env: TOMTOM_API_KEY, MONGODB_URI (optional MONGODB_DB, default "commute_pain").
+Runs every 30 min, 4:30am–1:30am IST (see .github/workflows/log.yml).
 Budget: <= MAX_ROUTES requests/run x 42 runs/day = 1,890/day, under TomTom's 2,500/day free tier
 (alternatives come back in the same request, so they're free).
 """
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import requests
+from pymongo import ASCENDING, DESCENDING, MongoClient
 
 MAX_ROUTES = 45  # keep in sync with lib/db.ts
-RADIO_TTL = timedelta(hours=3)
+LOG_TTL_DAYS = 60  # stats only use 8 weeks; TTL keeps the free 512MB cluster small
 TOMTOM_URL = "https://api.tomtom.com/routing/1/calculateRoute/{o}:{d}/json"
+
+# Community seed routes, inserted once (edit coordinates in Atlas → Browse Collections → routes).
+SEEDS = [
+    ("Gachibowli", 17.4401, 78.3489, "Ameerpet", 17.4375, 78.4483),
+    ("HITEC City", 17.4474, 78.3762, "Kukatpally", 17.4849, 78.4138),
+    ("Financial District", 17.4156, 78.3410, "Secunderabad", 17.4399, 78.4983),
+    ("Madhapur", 17.4483, 78.3915, "LB Nagar", 17.3457, 78.5522),
+    ("Kondapur", 17.4600, 78.3570, "Miyapur", 17.4968, 78.3614),
+    ("Raidurg", 17.4270, 78.3810, "Banjara Hills", 17.4156, 78.4347),
+]
+
+
+def setup(db):
+    """Idempotent: indexes + seed routes."""
+    db.commute_logs.create_index([("route_id", ASCENDING), ("logged_at", DESCENDING)])
+    db.commute_logs.create_index("logged_at", expireAfterSeconds=LOG_TTL_DAYS * 86400)
+    db.routes.create_index("slug", unique=True)
+    db.users.create_index("name", unique=True)
+    for ch, (o, olat, olng, d, dlat, dlng) in enumerate(SEEDS, start=1):
+        slug = f"{o}-{d}".lower().replace(" ", "-")
+        db.routes.update_one({"slug": slug}, {"$setOnInsert": {
+            "slug": slug, "ch": ch, "name": f"{o}→{d}", "owner_id": None, "owner_name": None,
+            "origin": {"label": o, "lat": olat, "lng": olng}, "dest": {"label": d, "lat": dlat, "lng": dlng},
+            "active": True, "created_at": datetime.now(timezone.utc),
+        }}, upsert=True)
 
 
 def fetch_route(session, key, r):
+    o, d = r["origin"], r["dest"]
     resp = session.get(
-        TOMTOM_URL.format(o=f"{r['origin_lat']},{r['origin_lng']}", d=f"{r['dest_lat']},{r['dest_lng']}"),
+        TOMTOM_URL.format(o=f"{o['lat']},{o['lng']}", d=f"{d['lat']},{d['lng']}"),
         params={"key": key, "traffic": "true", "travelMode": "car", "routeType": "fastest", "maxAlternatives": 2},
         timeout=20,
     )
     resp.raise_for_status()
     main, *alts = [x["summary"] for x in resp.json()["routes"]]
     return {
-        "route_id": r["id"],
+        "route_id": r["_id"],
         "duration_sec": main["travelTimeInSeconds"],
         "traffic_delay_sec": main.get("trafficDelayInSeconds", 0),
         "distance_m": main["lengthInMeters"],
@@ -32,45 +60,18 @@ def fetch_route(session, key, r):
     }
 
 
-def expire_radio(session, sb, headers):
-    cutoff = (datetime.now(timezone.utc) - RADIO_TTL).isoformat()
-    old = session.get(f"{sb}/rest/v1/radio_messages", params={"select": "id,audio_path", "created_at": f"lt.{cutoff}"}, headers=headers, timeout=20)
-    old.raise_for_status()
-    rows = old.json()
-    if not rows:
-        return
-    if paths := [r["audio_path"] for r in rows if r["audio_path"]]:
-        session.delete(f"{sb}/storage/v1/object/radio", json={"prefixes": paths}, headers=headers, timeout=20).raise_for_status()
-    session.delete(f"{sb}/rest/v1/radio_messages", params={"created_at": f"lt.{cutoff}"}, headers=headers, timeout=20).raise_for_status()
-    print(f"Radio: expired {len(rows)} messages ({len(paths)} clips).")
-
-
 def main():
-    env = {k: os.environ.get(k) for k in ("TOMTOM_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_KEY")}
-    if missing := [k for k, v in env.items() if not v]:
-        sys.exit(f"Missing env vars: {', '.join(missing)}")
-    key, sb = env["TOMTOM_API_KEY"], env["SUPABASE_URL"].rstrip("/")
-    sk = env["SUPABASE_SERVICE_KEY"]
-    headers = {"apikey": sk, "Content-Type": "application/json"}
-    if sk.startswith("ey"):  # legacy JWT service_role key also wants a bearer token; new sb_secret_ keys must not send one
-        headers["Authorization"] = f"Bearer {sk}"
+    key, uri = os.environ.get("TOMTOM_API_KEY"), os.environ.get("MONGODB_URI")
+    if not key or not uri:
+        sys.exit("Missing env vars: TOMTOM_API_KEY and/or MONGODB_URI")
 
+    db = MongoClient(uri, serverSelectionTimeoutMS=15000)[os.environ.get("MONGODB_DB") or "commute_pain"]
+    setup(db)
+    routes = list(db.routes.find({"active": True}).sort("ch", ASCENDING).limit(MAX_ROUTES))
+
+    logged_at = datetime.now(timezone.utc)  # one timestamp per run -> same slot
+    rows, sent = [], 0
     with requests.Session() as session:
-        try:
-            expire_radio(session, sb, headers)
-        except Exception as e:  # cleanup is best-effort; logging traffic matters more
-            print(f"[warn] radio cleanup: {e}")
-
-        r = session.get(
-            f"{sb}/rest/v1/routes",
-            params={"select": "id,name,origin_lat,origin_lng,dest_lat,dest_lng", "active": "eq.true", "order": "id", "limit": MAX_ROUTES},
-            headers=headers, timeout=20,
-        )
-        r.raise_for_status()
-        routes = r.json()
-
-        logged_at = datetime.now(timezone.utc).isoformat()  # one timestamp per run -> same slot
-        rows, sent = [], 0
         for route in routes:
             sent += 1
             try:
@@ -80,16 +81,16 @@ def main():
             except Exception as e:  # one bad route must not kill the run
                 print(f"[skip] {route['name']}: {str(e).replace(key, '***')}")  # URLs contain the key
 
-        print(f"TomTom requests this run: {sent} (~{sent * 42}/day vs 2,500 free)")
-        if not rows:
-            print("Nothing to insert.")
-            return
-        try:
-            session.post(f"{sb}/rest/v1/commute_logs", json=rows, headers={**headers, "Prefer": "return=minimal"}, timeout=20).raise_for_status()
-            print(f"Inserted {len(rows)}/{len(routes)} rows.")
-        except Exception as e:
-            print(f"[fail] Supabase insert: {e} {getattr(getattr(e, 'response', None), 'text', '')}")
-            sys.exit(1)  # data was lost this run; make the Action go red
+    print(f"TomTom requests this run: {sent} (~{sent * 42}/day vs 2,500 free)")
+    if not rows:
+        print("Nothing to insert.")
+        return
+    try:
+        db.commute_logs.insert_many(rows)
+        print(f"Inserted {len(rows)}/{len(routes)} rows.")
+    except Exception as e:
+        print(f"[fail] Mongo insert: {e}")
+        sys.exit(1)  # data was lost this run; make the Action go red
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ export default async function Image({ params }: { params: Promise<{ slug: string
         }}
       >
         <div style={{ display: "flex", fontSize: 26, color: "#6f6688" }}>
-          {route?.owner ? `@${route.owner.name.toUpperCase()}'S COMMUTE` : "COMMUTE PAIN TRACKER · HYD"}
+          {route?.owner_name ? `@${route.owner_name.toUpperCase()}'S COMMUTE` : "COMMUTE PAIN TRACKER · HYD"}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
           <div style={{ display: "flex", fontSize: 44, lineHeight: 1.4 }}>{name}</div>
