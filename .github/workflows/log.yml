@@ -1,0 +1,25 @@
+name: log-commute
+
+on:
+  schedule:
+    # every 30 min, 23:00–19:59 UTC = 4:30am–1:29am IST (skip dead-of-night to save TomTom quota).
+    # GitHub may delay runs by a few minutes; slots are floored to :00/:30 IST.
+    - cron: "*/30 0-19,23 * * *"
+  workflow_dispatch:
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python logger.py
+        env:
+          TOMTOM_API_KEY: ${{ secrets.TOMTOM_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
